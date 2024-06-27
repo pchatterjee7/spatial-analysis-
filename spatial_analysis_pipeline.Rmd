@@ -1,0 +1,82 @@
+
+# Load required libraries
+library(Seurat)
+library(SingleCellExperiment)
+library(SpatialExperiment)
+library(SpatialDE)
+library(ggplot2)
+library(dplyr)
+library(clusterProfiler)
+
+# Load example spatial RNA-seq data
+spatial_rna <- Read10X_Spatial(data.dir = "path/to/spatial/rna/seq/data")
+
+# Create a Seurat object
+seurat_rna <- CreateSeuratObject(counts = spatial_rna, project = "Spatial_RNASeq")
+
+# Normalize data
+seurat_rna <- SCTransform(seurat_rna, assay = "Spatial", verbose = FALSE)
+
+# Load example spatial proteomics data
+spatial_proteomics <- read.csv("path/to/spatial/proteomics/data.csv", row.names = 1)
+
+# Create a SingleCellExperiment object
+sce_proteomics <- SingleCellExperiment(assays = list(counts = as.matrix(spatial_proteomics)))
+
+# Normalize data
+sce_proteomics <- logNormCounts(sce_proteomics)
+
+# Convert Seurat Object to SingleCellExperiment
+sce_rna <- as.SingleCellExperiment(seurat_rna)
+
+# Merge RNA-seq and Proteomics Data
+common_coords <- intersect(colnames(sce_rna), colnames(sce_proteomics))
+
+# Subset the data to only include common coordinates
+sce_rna <- sce_rna[, common_coords]
+sce_proteomics <- sce_proteomics[, common_coords]
+
+# Create a combined SpatialExperiment object
+spe_combined <- SpatialExperiment(
+  assays = list(rna = counts(sce_rna), proteomics = counts(sce_proteomics)),
+  colData = colData(sce_rna)
+)
+
+# Quality Control
+seurat_rna <- subset(seurat_rna, subset = nFeature_Spatial > 200 & nFeature_Spatial < 2500 & percent.mt < 5)
+sce_proteomics <- sce_proteomics[, colSums(counts(sce_proteomics)) > 0]
+spe_combined <- spe_combined[, rowMeans(assay(spe_combined, "rna")) > 1 & rowMeans(assay(spe_combined, "proteomics")) > 1]
+
+# Spatial Differential Expression Analysis
+expr_data <- assays(spe_combined)$rna
+coords <- colData(spe_combined)[, c("x", "y")]
+results <- SpatialDE::run(expr_data, coords)
+
+# Visualize significant genes
+signif_genes <- results[results$qval < 0.05, "gene"]
+for (gene in signif_genes) {
+  SpatialFeaturePlot(seurat_rna, features = gene)
+}
+
+# Integration with Spatial Proteomics
+gene <- "GeneX"
+protein <- "ProteinX"
+
+# Plot RNA expression
+SpatialFeaturePlot(seurat_rna, features = gene) + ggtitle(paste("Spatial RNA-seq:", gene))
+
+# Plot Protein expression
+protein_expr <- assays(spe_combined)$proteomics[protein, ]
+ggplot(data.frame(coords, ProteinX = protein_expr), aes(x = x, y = y, color = ProteinX)) +
+  geom_point() +
+  scale_color_gradient(low = "blue", high = "red") +
+  ggtitle(paste("Spatial Proteomics:", protein))
+
+# Clustering analysis
+seurat_rna <- FindNeighbors(seurat_rna, dims = 1:10)
+seurat_rna <- FindClusters(seurat_rna, resolution = 0.5)
+
+# Pathway analysis
+cluster_markers <- FindMarkers(seurat_rna, ident.1 = 0, ident.2 = 1)
+pathway_results <- enrichKEGG(gene = rownames(cluster_markers), organism = "hsa")
+dotplot(pathway_results)
